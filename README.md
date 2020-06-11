@@ -39,4 +39,6 @@ Sterowanie termostatem odbywa się poprzez wykorzystanie metod dostępnych w pro
 
 * "/state" - Służy do regularnego odpytywania termostatu o jego podstawowe stany, temperatura lub czas grzania i wskazania czujnika temperatury.
 
+* "/basicdata" - Służy innym urządzeniom systemu iDom do samokontroli. Jeśli któreś urządzenie po uruchomieniu nie pamięta aktualnej godziny lub nie posiada czujnika światła, ta funkcja zwraca aktualną godzinę i dane z czujnika.
+
 * "/log" - Pod tym adresem znajduje się dziennik aktywności urządzenia (domyślnie wyłączony).
