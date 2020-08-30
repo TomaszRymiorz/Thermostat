@@ -303,25 +303,6 @@ void deleteWiFiSettings() {
   Serial.print("\n" + logs);
 }
 
-void deleteDeviceMemory() {
-  if (LittleFS.exists("/settings.txt")) {
-    LittleFS.remove("/settings.txt");
-  }
-  if (LittleFS.exists("/backup.txt")) {
-    LittleFS.remove("/backup.txt");
-  }
-  if (LittleFS.exists("/log.txt")) {
-    LittleFS.remove("/log.txt");
-  }
-  if (LittleFS.exists("/online.txt")) {
-    LittleFS.remove("/online.txt");
-  }
-
-  String logs = "The device has been cleared";
-  server.send(200, "text/plain", logs);
-  Serial.print("\n" + logs);
-}
-
 
 int findMDNSDevices() {
   int n = MDNS.queryService("idom", "tcp");
