@@ -9,10 +9,13 @@ void setup() {
 
   keep_log = LittleFS.exists("/log.txt");
 
-  note("iDom Thermostat " + String(version));
-  Serial.print("\nDevice ID: " + WiFi.macAddress());
+  #ifdef RTC_DS1307
+    rtc.begin();
+  #endif
+
+  note("iDom Thermostat " + String(version) + "." + String(core_version));
   offline = !LittleFS.exists("/online.txt");
-  Serial.printf("\nThe device is set to %s mode", offline ? "OFFLINE" : "ONLINE");
+  Serial.print(offline ? " OFFLINE" : " ONLINE");
 
   sprintf(host_name, "therm_%s", String(WiFi.macAddress()).c_str());
   WiFi.hostname(host_name);
@@ -24,11 +27,9 @@ void setup() {
     readSettings(1);
   }
 
-  RTC.begin();
-  if (RTC.isrunning()) {
-    start_time = RTC.now().unixtime() - offset - (dst ? 3600 : 0);
+  if (RTCisrunning()) {
+    start_time = rtc.now().unixtime() - offset - (dst ? 3600 : 0);
   }
-  Serial.printf("\nRTC initialization %s", start_time != 0 ? "completed" : "failed!");
 
   sensors.begin();
   sensors.requestTemperatures();
@@ -39,6 +40,8 @@ void setup() {
 
   powerButton.setSingleClickCallback(&powerButtonSingle, (void*)"");
   powerButton.setLongPressCallback(&powerButtonLong, (void*)"");
+
+  setupOTA();
 
   if (ssid != "" && password != "") {
     connectingToWifi();
@@ -57,12 +60,16 @@ bool readSettings(bool backup) {
 
   DynamicJsonDocument json_object(1024);
   deserializeJson(json_object, file.readString());
-  file.close();
 
   if (json_object.isNull() || json_object.size() < 5) {
     note(String(backup ? "Backup" : "Settings") + " file error");
+    file.close();
     return false;
   }
+
+  file.seek(0);
+  note("Reading the " + String(backup ? "backup" : "settings") + " file:\n " + file.readString());
+  file.close();
 
   if (json_object.containsKey("ssid")) {
     ssid = json_object["ssid"].as<String>();
@@ -108,36 +115,56 @@ bool readSettings(bool backup) {
     vacation = json_object["vacation"].as<uint32_t>();
   }
 
-  String logs;
-  serializeJson(json_object, logs);
-  note("Reading the " + String(backup ? "backup" : "settings") + " file:\n " + logs);
-
-  saveSettings();
+  saveSettings(false);
 
   return true;
 }
 
 void saveSettings() {
+  saveSettings(true);
+}
+
+void saveSettings(bool log) {
   DynamicJsonDocument json_object(1024);
 
   json_object["ssid"] = ssid;
   json_object["password"] = password;
 
-  json_object["smart"] = smart_string;
+  if (smart_string.length() > 2) {
+    json_object["smart"] = smart_string;
+  }
   json_object["uprisings"] = uprisings;
-  json_object["offset"] = offset;
-  json_object["dst"] = dst;
-  json_object["correction"] = correction;
-  json_object["plustemp"] = heating_temperature_plus;
-  json_object["plustime"] = heating_time_plus;
-  json_object["minimum"] = minimum_temperature;
-  json_object["downtime"] = downtime_plus;
-  json_object["vacation"] = vacation;
+  if (offset > 0) {
+    json_object["offset"] = offset;
+  }
+  if (dst) {
+    json_object["dst"] = dst;
+  }
+  if (correction != -3.5) {
+    json_object["correction"] = correction;
+  }
+  if (heating_temperature_plus != 1.0) {
+    json_object["plustemp"] = heating_temperature_plus;
+  }
+  if (heating_time_plus != 600) {
+    json_object["plustime"] = heating_time_plus;
+  }
+  if (minimum_temperature != 7) {
+    json_object["minimum"] = minimum_temperature;
+  }
+  if (downtime_plus != 10800) {
+    json_object["downtime"] = downtime_plus;
+  }
+  if (vacation > 0) {
+    json_object["vacation"] = vacation;
+  }
 
   if (writeObjectToFile("settings", json_object)) {
-    String logs;
-    serializeJson(json_object, logs);
-    note("Saving settings:\n " + logs);
+    if (log) {
+      String logs;
+      serializeJson(json_object, logs);
+      note("Saving settings:\n " + logs);
+    }
 
     writeObjectToFile("backup", json_object);
   } else {
@@ -155,33 +182,36 @@ bool resume() {
   deserializeJson(json_object, file.readString());
   file.close();
 
-  if (!json_object.isNull() && json_object.size() > 0) {
-    if (json_object.containsKey("htemp")) {
-      heating_temperature = json_object["htemp"].as<float>();
-    }
-    if (json_object.containsKey("htime")) {
-      heating_time = json_object["htime"].as<int>();
-      if (getHeatingTime() > 4000 && !RTC.isrunning()) {
-        heating_time = 0;
-      }
-    }
+  if (json_object.isNull() || json_object.size() < 1) {
+    return false;
+  }
 
-    if (heating_temperature > 0 || heating_time > 0) {
-      setHeating(true, "resume");
-    } else {
-      if (LittleFS.exists("/resume.txt")) {
-        LittleFS.remove("/resume.txt");
-      }
-      return false;
+  if (json_object.containsKey("htemp")) {
+    heating_temperature = json_object["htemp"].as<float>();
+  }
+  if (json_object.containsKey("htime")) {
+    heating_time = json_object["htime"].as<int>();
+    if (getHeatingTime() > 4000 && !RTCisrunning()) {
+      heating_time = 0;
     }
   }
+
+  if (heating_temperature > 0 || heating_time > 0) {
+    setHeating(true, "resume");
+  } else {
+    if (LittleFS.exists("/resume.txt")) {
+      LittleFS.remove("/resume.txt");
+    }
+    return false;
+  }
+
   return true;
 }
 
 void saveTheState() {
   DynamicJsonDocument json_object(1024);
 
-  if (heating_temperature > 0) {
+  if (heating_temperature > 0.0) {
     json_object["htemp"] = heating_temperature;
   }
   if (heating_time > 0) {
@@ -205,38 +235,40 @@ void startServices() {
   server.on("/set", HTTP_PUT, receivedOfflineData);
   server.on("/state", HTTP_GET, requestForState);
   server.on("/basicdata", HTTP_POST, exchangeOfBasicData);
-  server.on("/priority", HTTP_POST, confirmationOfPriority);
   server.on("/log", HTTP_GET, requestForLogs);
   server.on("/log", HTTP_DELETE, clearTheLog);
+  server.on("/admin/update", HTTP_POST, manualUpdate);
   server.on("/admin/log", HTTP_POST, activationTheLog);
   server.on("/admin/log", HTTP_DELETE, deactivationTheLog);
-  server.on("/admin/wifisettings", HTTP_DELETE, deleteWiFiSettings);
   server.begin();
 
-  note("Launch of services. " + String(host_name) + (MDNS.begin(host_name) ? " started." : " unsuccessful!"));
+  note(String(host_name) + (MDNS.begin(host_name) ? " started" : " unsuccessful!"));
 
   MDNS.addService("idom", "tcp", 8080);
 
-  if (!offline) {
-    prime = true;
-  }
-  networked_devices = WiFi.macAddress();
-  getOfflineData(true, true);
+  getTime();
+  getOfflineData();
 }
 
 String getThermostatDetail() {
-  return String(RTC.isrunning()) + "," + String(start_time) + "," + uprisings + "," + version + "," + correction + "," + minimum_temperature  + "," + heating_temperature_plus + "," + heating_time_plus + "," + downtime_plus + "," + vacation;
+  return String(RTCisrunning()) + "," + String(start_time) + "," + uprisings + "," + version + "," + correction + "," + minimum_temperature  + "," + heating_temperature_plus + "," + heating_time_plus + "," + downtime_plus + "," + vacation;
+}
+
+String getValue() {
+  return String(heating);
 }
 
 int getHeatingTime() {
-  return heating_time > 0 ? (RTC.isrunning() ? (heating_time - RTC.now().unixtime()) : heating_time) : 0;
+  return heating_time > 0 ? (RTCisrunning() ? (heating_time - rtc.now().unixtime()) : heating_time) : 0;
 }
 
 void handshake() {
-  readData(server.arg("plain"), true);
+  if (server.hasArg("plain")) {
+    readData(server.arg("plain"), true);
+  }
 
   String reply = "\"id\":\"" + WiFi.macAddress()
-  + "\",\"value\":" + heating
+  + "\",\"value\":" + getValue()
   + ",\"htemp\":" + heating_temperature
   + ",\"htime\":" + String(getHeatingTime())
   + ",\"temp\":" + temperature
@@ -248,22 +280,20 @@ void handshake() {
   + ",\"vacation\":" + vacation
   + ",\"version\":" + version
   + ",\"smart\":\"" + smart_string
-  + "\",\"rtc\":" + RTC.isrunning()
+  + "\",\"rtc\":" + RTCisrunning()
   + ",\"dst\":" + dst
   + ",\"offset\":" + offset
-  + ",\"time\":" + String(RTC.now().unixtime() - offset - (dst ? 3600 : 0))
-  + ",\"active\":" + String(start_time != 0 ? RTC.now().unixtime() - offset - (dst ? 3600 : 0) - start_time : 0)
+  + ",\"time\":" + (RTCisrunning() ? String(rtc.now().unixtime() - offset - (dst ? 3600 : 0)) : "0")
+  + ",\"active\":" + (RTCisrunning() ? String((rtc.now().unixtime() - offset - (dst ? 3600 : 0)) - start_time) : "0")
   + ",\"uprisings\":" + uprisings
-  + ",\"offline\":" + offline
-  + ",\"prime\":" + prime
-  + ",\"devices\":\"" + networked_devices + "\"";
+  + ",\"offline\":" + offline;
 
   Serial.print("\nHandshake");
   server.send(200, "text/plain", "{" + reply + "}");
 }
 
 void requestForState() {
-  String reply = "\"state\":" + String(heating)
+  String reply = "\"state\":" + getValue()
   + (heating_temperature > 0 ? ",\"htemp\":" + String(heating_temperature) : "")
   + (heating_time > 0 ? ",\"htime\":" + String(getHeatingTime()) : "")
   + ",\"temp\":" + String(temperature);
@@ -272,32 +302,70 @@ void requestForState() {
 }
 
 void exchangeOfBasicData() {
-  readData(server.arg("plain"), true);
+  if (server.hasArg("plain")) {
+    readData(server.arg("plain"), true);
+  }
 
-  String reply = RTC.isrunning() ? ("\"time\":" + String(RTC.now().unixtime() - offset - (dst ? 3600 : 0))
-  + ",\"offset\":" + offset
-  + ",\"dst\":" + String(dst)) : "";
+  String reply = "\"offset\":" + String(offset) + ",\"dst\":" + String(dst);
+
+  if (RTCisrunning()) {
+    reply += ",\"time\":" + String(rtc.now().unixtime() - offset - (dst ? 3600 : 0));
+  }
 
   reply += temperature > -127.0 ? (String(reply.length() > 0 ? "," : "") + "\"temp\":\"" + String(temperature) + "\"") : "";
-
-  reply += !offline && prime ? (String(reply.length() > 0 ? "," : "") + "\"prime\":" + String(prime)) : "";
-
-  reply += String(reply.length() > 0 ? "," : "") + "\"id\":\"" + String(WiFi.macAddress()) + "\"";
 
   server.send(200, "text/plain", "{" + reply + "}");
 }
 
 
+void powerButtonSingle(void* s) {
+  if (heating) {
+    heating_time = 0;
+    heating_temperature = 0.0;
+    if (smart_heating > -1) {
+      downtime = downtime_plus;
+    }
+  } else {
+    heating_time = RTCisrunning() ? (rtc.now().unixtime() + heating_time_plus) : heating_time_plus;
+    heating_temperature = 0.0;
+    downtime = 0;
+  }
+  smart_heating = -1;
+  remote_heating = false;
+  setHeating(!heating, "manual");
+}
+
+void powerButtonLong(void* s) {
+
+  if (heating) {
+    heating_time = 0;
+    heating_temperature = 0.0;
+    if (smart_heating > -1) {
+      downtime = RTCisrunning() ? (86400 - (rtc.now().hour() * 3600) - rtc.now().minute() * 60) : 86400;
+    }
+  } else {
+    heating_time = 0;
+    heating_temperature = temperature + heating_temperature_plus;
+    downtime = 0;
+  }
+  smart_heating = -1;
+  remote_heating = false;
+  setHeating(!heating, "manual");
+}
+
+
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {
+
+    ArduinoOTA.handle();
+    server.handleClient();
+    MDNS.update();
+  } else {
     if (!sending_error) {
       note("Wi-Fi connection lost");
     }
     sending_error = true;
   }
-
-  server.handleClient();
-  MDNS.update();
 
   powerButton.poll();
 
@@ -309,11 +377,11 @@ void loop() {
     if (heating) {
       if (heating_time > 0) {
         saveTheState();
-        int time = RTC.isrunning() ? (heating_time - RTC.now().unixtime()) : heating_time--;
+        int time = RTCisrunning() ? (heating_time - rtc.now().unixtime()) : heating_time--;
         if (time <= 0) {
           automaticHeatingOff();
         } else {
-          putOnlineData("detail", "returned=" + String(temperature) + (heating_time > 0 ?  "c" + String(getHeatingTime()) : ""), false);
+          putOnlineData("returned=" + String(temperature) + (heating_time > 0 ?  "c" + String(getHeatingTime()) : ""), false, true);
         }
       }
       if (heating_temperature > 0 && heating_temperature <= temperature) {
@@ -327,48 +395,12 @@ void loop() {
   }
 }
 
-
-void powerButtonSingle(void* s) {
-  if (heating) {
-    heating_time = 0;
-    heating_temperature = 0.0;
-    if (smart_heating > -1) {
-      downtime = downtime_plus;
-    }
-  } else {
-    heating_time = RTC.isrunning() ? (RTC.now().unixtime() + heating_time_plus) : heating_time_plus;
-    heating_temperature = 0.0;
-    downtime = 0;
-  }
-  smart_heating = -1;
-  remote_heating = false;
-  setHeating(!heating, "Manual");
-}
-
-void powerButtonLong(void* s) {
-
-  if (heating) {
-    heating_time = 0;
-    heating_temperature = 0.0;
-    if (smart_heating > -1) {
-      downtime = RTC.isrunning() ? (86400 - (RTC.now().hour() * 3600) - RTC.now().minute() * 60) : 86400;
-    }
-  } else {
-    heating_time = 0;
-    heating_temperature = temperature + heating_temperature_plus;
-    downtime = 0;
-  }
-  smart_heating = -1;
-  remote_heating = false;
-  setHeating(!heating, "Manual");
-}
-
 void automaticHeatingOff() {
   heating_time = 0;
   heating_temperature = 0.0;
   smart_heating = -1;
   remote_heating = false;
-  setHeating(false, "Automatic");
+  setHeating(false, "automatic");
 }
 
 bool hasTheTemperatureChanged() {
@@ -382,7 +414,7 @@ bool hasTheTemperatureChanged() {
   if (temperature != new_temperature) {
     temperature = new_temperature;
     putMultiOfflineData("{\"temp\":" + String(temperature) + "}");
-    putOnlineData("detail", "returned=" + String(temperature) + (heating_temperature > 0 ? "t" + String(heating_temperature) : "") + (heating_time > 0 ? "c" + String(getHeatingTime()) : ""), false);
+    putOnlineData("returned=" + String(temperature) + (heating_temperature > 0 ? "t" + String(heating_temperature) : "") + (heating_time > 0 ? "c" + String(getHeatingTime()) : ""), false, true);
     return true;
   }
 
@@ -395,121 +427,93 @@ void readData(String payload, bool per_wifi) {
 
   if (json_object.isNull()) {
     if (payload.length() > 0) {
-      Serial.print("\n Parsing failed!");
+      note("Parsing failed!");
     }
     return;
-  }
-
-  if (json_object.containsKey("apk")) {
-    per_wifi = json_object["apk"].as<bool>();
-  }
-
-  if (json_object.containsKey("id")) {
-    String new_networked_devices = json_object["id"].as<String>();
-    if (!strContains(networked_devices, new_networked_devices)) {
-      networked_devices +=  "," + new_networked_devices;
-    }
-  }
-
-  if (json_object.containsKey("prime")) {
-    prime = false;
   }
 
   bool settings_change = false;
   bool details_change = false;
   String result = "";
 
-  uint32_t new_time = 0;
   if (json_object.containsKey("offset")) {
-    int new_offset = json_object["offset"].as<int>();
-    if (offset != new_offset) {
-      if (RTC.isrunning() && !json_object.containsKey("time")) {
-        RTC.adjust(DateTime((RTC.now().unixtime() - offset) + new_offset));
+    if (offset != json_object["offset"].as<int>()) {
+      if (RTCisrunning() && !json_object.containsKey("time")) {
+        rtc.adjust(DateTime((rtc.now().unixtime() - offset) + json_object["offset"].as<int>()));
         note("Time zone change");
       }
 
-      offset = new_offset;
+      offset = json_object["offset"].as<int>();
       settings_change = true;
     }
   }
 
   if (json_object.containsKey("dst")) {
-    bool new_dst = json_object["dst"].as<bool>();
-    if (dst != new_dst) {
-      if (RTC.isrunning() && !json_object.containsKey("time")) {
-        if (new_dst) {
-          new_time = RTC.now().unixtime() + 3600;
-        } else {
-          new_time = RTC.now().unixtime() - 3600;
-        }
-        RTC.adjust(DateTime(new_time));
-        note(new_dst ? "Summer time" : "Winter time");
-      }
-
-      dst = new_dst;
+    if (dst != strContains(json_object["dst"].as<String>(), "1")) {
+      dst = !dst;
       settings_change = true;
+
+      if (RTCisrunning() && !json_object.containsKey("time")) {
+        rtc.adjust(DateTime(rtc.now().unixtime() + (dst ? 3600 : -3600)));
+        note(dst ? "Summer time" : "Winter time");
+      }
     }
   }
 
   if (json_object.containsKey("time")) {
-    new_time = json_object["time"].as<uint32_t>() + offset + (dst ? 3600 : 0);
+    int new_time = json_object["time"].as<uint32_t>() + offset + (dst ? 3600 : 0);
     if (new_time > 1546304461) {
-      if (RTC.isrunning()) {
-        if (abs(new_time - RTC.now().unixtime()) > 60) {
-          RTC.adjust(DateTime(new_time));
+      if (RTCisrunning()) {
+        if (abs(new_time - (int)rtc.now().unixtime()) > 60) {
+          rtc.adjust(DateTime(new_time));
+          note("Adjust time");
         }
       } else {
-        RTC.adjust(DateTime(new_time));
-        note("Adjust time");
-        start_time = RTC.now().unixtime() - offset - (dst ? 3600 : 0);
-        if (RTC.isrunning()) {
-          sayHelloToTheServer();
+        rtc.adjust(DateTime(new_time));
+        note("RTC begin");
+        start_time = rtc.now().unixtime() - offset - (dst ? 3600 : 0);
+        if (RTCisrunning()) {
+          details_change = true;
         }
       }
-    }
-  }
-
-  if (json_object.containsKey("up")) {
-    uint32_t new_update_time = json_object["up"].as<uint32_t>();
-    if (update_time < new_update_time) {
-      update_time = new_update_time;
     }
   }
 
   if (json_object.containsKey("smart")) {
-    String new_smart_string = json_object["smart"].as<String>();
-    if (smart_string != new_smart_string) {
-      smart_string = new_smart_string;
+    if (smart_string != json_object["smart"].as<String>()) {
+      smart_string = json_object["smart"].as<String>();
       setSmart();
       if (smart_heating > -1) {
         heating_temperature = 0.0;
         smart_heating = -1;
-        setHeating(false, "Remote");
+        setHeating(false, "remote");
       }
-      result = "smart=" + getSmartString();
+      if (per_wifi) {
+        result += String(result.length() > 0 ? "&" : "") + "smart=" + getSmartString();
+      }
       settings_change = true;
     }
   }
 
-  if (json_object.containsKey("val")) {
-    String new_heating = json_object["val"].as<String>();
-    if (strContains(new_heating, "t")) {
+  if (json_object.containsKey("val") && !json_object.containsKey("blinds")) {
+    String newValue = json_object["val"].as<String>();
+    if (strContains(newValue, "t")) {
       heating_time = 0;
-      heating_temperature = new_heating.substring(new_heating.indexOf("t") + 1).toFloat();
+      heating_temperature = newValue.substring(newValue.indexOf("t") + 1).toFloat();
       downtime = 0;
       smart_heating = -1;
       remote_heating = true;
-      setHeating(true, "Remote");
+      setHeating(true, "remote");
     }
-    if (strContains(new_heating, "c")) {
-      heating_time = RTC.isrunning() ? (RTC.now().unixtime() + new_heating.substring(new_heating.indexOf("c") + 1).toInt()) : new_heating.substring(new_heating.indexOf("c") + 1).toInt();
+    if (strContains(newValue, "c")) {
+      heating_time = RTCisrunning() ? (rtc.now().unixtime() + newValue.substring(newValue.indexOf("c") + 1).toInt()) : newValue.substring(newValue.indexOf("c") + 1).toInt();
       heating_temperature = 0.0;
       downtime = 0;
       smart_heating = -1;
       remote_heating = true;
-      setHeating(true, "Remote");
+      setHeating(true, "remote");
     }
-    if (heating && strContains(new_heating.substring(0, 1), "0") && !strContains(new_heating, "t") && !strContains(new_heating, "c") && !strContains(new_heating, "v")) {
+    if (heating && strContains(newValue.substring(0, 1), "0") && !strContains(newValue, "t") && !strContains(newValue, "c") && !strContains(newValue, "v")) {
       heating_time = 0;
       heating_temperature = 0.0;
       if (smart_heating > -1) {
@@ -517,19 +521,19 @@ void readData(String payload, bool per_wifi) {
       }
       smart_heating = -1;
       remote_heating = false;
-      setHeating(false, "Remote");
+      setHeating(false, "remote");
     }
-    if (strContains(new_heating, "v")) {
-      vacation = new_heating.substring(new_heating.indexOf("v") + 1).toInt() + offset + (dst ? 3600 : 0);
+    if (strContains(newValue, "v")) {
+      vacation = newValue.substring(newValue.indexOf("v") + 1).toInt() + offset + (dst ? 3600 : 0);
       if (vacation > 0 && smart_heating > -1) {
         heating_time = 0;
         heating_temperature = 0.0;
         downtime = 0;
         smart_heating = -1;
         remote_heating = false;
-        setHeating(false, "Vacation");
+        setHeating(false, "vacation");
       } else {
-        putOnlineData("detail", "val=" + String(heating));
+        putOnlineData("val=" + String(heating));
       }
       per_wifi = true;
       details_change = true;
@@ -537,42 +541,37 @@ void readData(String payload, bool per_wifi) {
   }
 
   if (json_object.containsKey("minimum")) {
-    float new_minimum_temperature = json_object["minimum"].as<float>();
-    if (minimum_temperature != new_minimum_temperature) {
-      minimum_temperature = new_minimum_temperature;
+    if (minimum_temperature != json_object["minimum"].as<float>()) {
+      minimum_temperature = json_object["minimum"].as<float>();
       details_change = true;
     }
   }
 
   if (json_object.containsKey("correction")) {
-    float new_correction = json_object["correction"].as<float>();
-    if (correction != new_correction) {
-      temperature = (temperature - correction) + new_correction;
-      correction = new_correction;
+    if (correction != json_object["correction"].as<float>()) {
+      temperature = (temperature - correction) + json_object["correction"].as<float>();
+      correction = json_object["correction"].as<float>();
       details_change = true;
     }
   }
 
   if (json_object.containsKey("plustemp")) {
-    float new_heating_temperature_plus = json_object["plustemp"].as<float>();
-    if (heating_temperature_plus != new_heating_temperature_plus) {
-      heating_temperature_plus = new_heating_temperature_plus;
+    if (heating_temperature_plus != json_object["plustemp"].as<float>()) {
+      heating_temperature_plus = json_object["plustemp"].as<float>();
       details_change = true;
     }
   }
 
   if (json_object.containsKey("plustime")) {
-    int new_heating_time_plus = json_object["plustime"].as<int>();
-    if (heating_time_plus != new_heating_time_plus) {
-      heating_time_plus = new_heating_time_plus;
+    if (heating_time_plus != json_object["plustime"].as<int>()) {
+      heating_time_plus = json_object["plustime"].as<int>();
       details_change = true;
     }
   }
 
   if (json_object.containsKey("downtime")) {
-    int new_downtime_plus = json_object["downtime"].as<int>();
-    if (downtime != new_downtime_plus) {
-      downtime_plus = new_downtime_plus;
+    if (downtime != json_object["downtime"].as<int>()) {
+      downtime_plus = json_object["downtime"].as<int>();
       details_change = true;
     }
   }
@@ -581,11 +580,11 @@ void readData(String payload, bool per_wifi) {
     note("Received the data:\n " + payload);
     saveSettings();
   }
-  if (per_wifi && (result.length() > 0 || details_change)) {
+  if (!offline && (result.length() > 0 || details_change)) {
     if (details_change) {
       result += String(result.length() > 0 ? "&" : "") + "detail=" + getThermostatDetail();
     }
-    putOnlineData("detail", result);
+    putOnlineData(result, true);
   }
 }
 
@@ -595,20 +594,13 @@ void setSmart() {
     return;
   }
 
-  String smart;
-  bool enabled;
-  String days;
-  float temp;
-  int start_time;
-  int end_time;
-
   int count = 1;
   smart_count = 1;
-  for (byte b: smart_string) {
+  for (char b: smart_string) {
     if (b == ',') {
       count++;
     }
-    if (b == 't') {
+    if (b == smart_prefix) {
       smart_count++;
     }
   }
@@ -619,32 +611,51 @@ void setSmart() {
   smart_array = new Smart[smart_count];
   smart_count = 0;
 
+  String single_smart_string;
+
   for (int i = 0; i < count; i++) {
-    smart = get1(smart_string, i);
-    if (smart.length() > 0 && strContains(smart, "t")) {
-      enabled = !strContains(smart, "/");
-      smart = enabled ? smart : smart.substring(1);
+    single_smart_string = get1(smart_string, i);
+    if (strContains(single_smart_string, String(smart_prefix))) {
 
-      start_time = strContains(smart, "_") ? smart.substring(0, smart.indexOf("_")).toInt() : -1;
-      end_time = strContains(smart, "-") ? smart.substring(smart.indexOf("-") + 1).toInt() : -1;
+      if (strContains(single_smart_string, "/")) {
+        smart_array[smart_count].enabled = false;
+        single_smart_string = single_smart_string.substring(1);
+      } else {
+        smart_array[smart_count].enabled = true;
+      }
 
-      smart = strContains(smart, "_") ? smart.substring(smart.indexOf("_") + 1) : smart;
-      smart = strContains(smart, "-") ? smart.substring(0, smart.indexOf("-")) : smart;
+      if (strContains(single_smart_string, "_")) {
+        smart_array[smart_count].start_time = single_smart_string.substring(0, single_smart_string.indexOf("_")).toInt();
+        single_smart_string = single_smart_string.substring(single_smart_string.indexOf("_") + 1);
+      } else {
+        smart_array[smart_count].start_time = -1;
+      }
 
-      days = strContains(smart, "w") ? "w" : "";
-      days += strContains(smart, "o") ? "o" : "";
-      days += strContains(smart, "u") ? "u" : "";
-      days += strContains(smart, "e") ? "e" : "";
-      days += strContains(smart, "h") ? "h" : "";
-      days += strContains(smart, "r") ? "r" : "";
-      days += strContains(smart, "a") ? "a" : "";
-      days += strContains(smart, "s") ? "s" : "";
+      if (strContains(single_smart_string, "-")) {
+        smart_array[smart_count].end_time = single_smart_string.substring(single_smart_string.indexOf("-") + 1).toInt();
+        single_smart_string = single_smart_string.substring(0, single_smart_string.indexOf("-"));
+      } else {
+        smart_array[smart_count].end_time = -1;
+      }
 
-      temp = isDigit(smart.charAt(0)) && isDigit(smart.charAt(1)) && isDigit(smart.charAt(3)) ? smart.substring(0, 4).toFloat() : -1;
+      if (strContains(single_smart_string, "w")) {
+        smart_array[smart_count].days = "w";
+      } else {
+        smart_array[smart_count].days = strContains(single_smart_string, "o") ? "o" : "";
+        smart_array[smart_count].days += strContains(single_smart_string, "u") ? "u" : "";
+        smart_array[smart_count].days += strContains(single_smart_string, "e") ? "e" : "";
+        smart_array[smart_count].days += strContains(single_smart_string, "h") ? "h" : "";
+        smart_array[smart_count].days += strContains(single_smart_string, "r") ? "r" : "";
+        smart_array[smart_count].days += strContains(single_smart_string, "a") ? "a" : "";
+        smart_array[smart_count].days += strContains(single_smart_string, "s") ? "s" : "";
+      }
 
-      smart_array[smart_count++] = (Smart) {enabled, days, temp, start_time, end_time};
+      smart_array[smart_count].temp = isDigit(single_smart_string.charAt(0)) && isDigit(single_smart_string.charAt(1)) && isDigit(single_smart_string.charAt(3)) ? single_smart_string.substring(0, 4).toFloat() : -1;
+
+      smart_count++;
     }
   }
+  note("Smart contains " + String(smart_count) + " of " + String(smart_prefix));
 }
 
 bool automaticSettings() {
@@ -655,26 +666,31 @@ bool automaticSettings(bool temperature_changed) {
   bool result = false;
   bool new_heating = false;
   float new_heating_temperature = 0.0;
-  DateTime now = RTC.now();
+  DateTime now = rtc.now();
+  String log = "Smart ";
+  int current_time = -1;
 
-  if (RTC.isrunning()) {
-    int current_time = (now.hour() * 60) + now.minute();
-
+  if (RTCisrunning()) {
+    current_time = (now.hour() * 60) + now.minute();
     if (current_time == 120 || current_time == 180) {
       if (now.month() == 3 && now.day() > 24 && days_of_the_week[now.dayOfTheWeek()][0] == 's' && current_time == 120 && !dst) {
-        int new_time = RTC.now().unixtime() + 3600;
-        RTC.adjust(DateTime(new_time));
+        int new_time = now.unixtime() + 3600;
+        rtc.adjust(DateTime(new_time));
         dst = true;
-        saveSettings();
         note("Smart set to summer time");
+        saveSettings();
       }
       if (now.month() == 10 && now.day() > 24 && days_of_the_week[now.dayOfTheWeek()][0] == 's' && current_time == 180 && dst) {
-        int new_time = RTC.now().unixtime() - 3600;
-        RTC.adjust(DateTime(new_time));
+        int new_time = now.unixtime() - 3600;
+        rtc.adjust(DateTime(new_time));
         dst = false;
-        saveSettings();
         note("Smart set to winter time");
+        saveSettings();
       }
+    }
+
+    if (current_time == (WiFi.localIP()[3] / 2) && now.second() == 0) {
+      checkForUpdate(false);
     }
   }
 
@@ -686,16 +702,14 @@ bool automaticSettings(bool temperature_changed) {
       smart_heating = -2;
     }
 
-    if (downtime == 0 && (vacation == 0 || (RTC.isrunning() && vacation < now.unixtime()))) {
+    if (downtime == 0 && (vacation == 0 || (RTCisrunning() && vacation < now.unixtime()))) {
       int i = -1;
       while (++i < smart_count) {
         if (smart_array[i].enabled) {
           bool inTime = false;
 
-          if (strContains(smart_array[i].days, "w") || (RTC.isrunning() && strContains(smart_array[i].days, days_of_the_week[now.dayOfTheWeek()]))) {
-
-            int current_time = RTC.isrunning() ? ((now.hour() * 60) + now.minute()) : -1;
-            inTime = ((smart_array[i].start_time == -1 || (RTC.isrunning() && smart_array[i].start_time <= current_time)) && (smart_array[i].end_time == -1 || (RTC.isrunning() && smart_array[i].end_time > current_time)));
+          if (strContains(smart_array[i].days, "w") || (RTCisrunning() && strContains(smart_array[i].days, days_of_the_week[now.dayOfTheWeek()]))) {
+            inTime = ((smart_array[i].start_time == -1 || (RTCisrunning() && smart_array[i].start_time <= current_time)) && (smart_array[i].end_time == -1 || (RTCisrunning() && smart_array[i].end_time > current_time)));
           }
 
           if (inTime) {
@@ -708,7 +722,7 @@ bool automaticSettings(bool temperature_changed) {
               }
             }
           } else {
-            if (RTC.isrunning() && smart_heating == i) {
+            if (RTCisrunning() && smart_heating == i) {
               result = true;
               smart_heating = -1;
             }
@@ -722,7 +736,7 @@ bool automaticSettings(bool temperature_changed) {
     heating_temperature = new_heating_temperature;
     heating_time = 0;
     remote_heating = false;
-    setHeating(new_heating, "Smart");
+    setHeating(new_heating, "smart");
 
     return true;
   }
@@ -737,7 +751,7 @@ void setHeating(bool set, String note_text) {
   }
 
   note(note_text + " switch-" + String(set ? "on" : "off"));
-  putOnlineData("detail", "val=" + String(set) + "&returned=" + String(temperature) + (heating_time > 0 ? "c" + String(getHeatingTime()) : "") + (heating_temperature > 0 ? "t" + String(heating_temperature) : ""));
+  putOnlineData("val=" + String(set) + "&returned=" + String(temperature) + (heating_time > 0 ? "c" + String(getHeatingTime()) : "") + (heating_temperature > 0 ? "t" + String(heating_temperature) : ""));
 
   if (set) {
     saveTheState();

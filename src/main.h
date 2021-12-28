@@ -7,8 +7,12 @@
 #include <stdio.h>
 #include <time.h>
 
+#define physical_clock
+#define thermostat
+
 const char device[7] = "therm";
-const int version = 4;
+const char smart_prefix = 't';
+const int version = 5;
 
 OneWire oneWire(D5);
 DallasTemperature sensors(&oneWire);
@@ -43,17 +47,18 @@ float correction = -3.5;
 
 bool readSettings(bool backup);
 void saveSettings();
+void saveSettings(bool log);
 bool resume();
 void saveTheState();
 void sayHelloToTheServer();
 void introductionToServer();
 void startServices();
 String getThermostatDetail();
+String getValue();
 int getHeatingTime();
 void handshake();
 void requestForState();
 void exchangeOfBasicData();
-void deleteDeviceMemory();
 bool hasTheTemperatureChanged();
 void powerButtonSingle(void* s);
 void powerButtonLong(void* s);
