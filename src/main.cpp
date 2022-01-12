@@ -85,6 +85,9 @@ bool readSettings(bool backup) {
   if (json_object.containsKey("uprisings")) {
     uprisings = json_object["uprisings"].as<int>() + 1;
   }
+  if (json_object.containsKey("log")) {
+    last_accessed_log = json_object["log"].as<int>() + 1;
+  }
   if (json_object.containsKey("offset")) {
     offset = json_object["offset"].as<int>();
   }
@@ -134,6 +137,9 @@ void saveSettings(bool log) {
     json_object["smart"] = smart_string;
   }
   json_object["uprisings"] = uprisings;
+  if (last_accessed_log > 0) {
+    json_object["log"] = last_accessed_log;
+  }
   if (offset > 0) {
     json_object["offset"] = offset;
   }
@@ -251,8 +257,9 @@ void startServices() {
 }
 
 String getThermostatDetail() {
-  return String(RTCisrunning()) + "," + String(start_time) + "," + uprisings + "," + version + "," + correction + "," + minimum_temperature  + "," + heating_temperature_plus + "," + heating_time_plus + "," + downtime_plus + "," + vacation;
-}
+  return "";
+    // This function is only available with a ready-made iDom device.
+  }
 
 String getValue() {
   return String(heating);
@@ -273,6 +280,7 @@ void handshake() {
   + ",\"htime\":" + String(getHeatingTime())
   + ",\"temp\":" + temperature
   + ",\"correction\":" + correction
+  + ",\"last_accessed_log\":" + last_accessed_log
   + ",\"minimum\":" + minimum_temperature
   + ",\"plustemp\":" + heating_temperature_plus
   + ",\"plustime\":" + heating_time_plus
@@ -361,10 +369,14 @@ void loop() {
     server.handleClient();
     MDNS.update();
   } else {
-    if (!sending_error) {
-      note("Wi-Fi connection lost");
+    if (ssid != "" && password != "") {
+      connectingToWifi(false);
+    } else {
+      if (!sending_error) {
+        sending_error = true;
+        note("Wi-Fi connection lost");
+      }
     }
-    sending_error = true;
   }
 
   powerButton.poll();
@@ -686,6 +698,12 @@ bool automaticSettings(bool temperature_changed) {
         dst = false;
         note("Smart set to winter time");
         saveSettings();
+      }
+    }
+
+    if (current_time == 60 && now.second() == 0) {
+      if (last_accessed_log++ > 14) {
+        deactivationTheLog();
       }
     }
 
