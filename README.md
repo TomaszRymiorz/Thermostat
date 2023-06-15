@@ -19,16 +19,27 @@ Zegar czasu rzeczywistego wykorzystywany jest przez funkcję ustawień automatyc
 Ustawienia automatyczne obejmują minimalną temperaturę oraz możliwość ustawienia zakresu godzinowego.
 Powtarzalność obejmuje okres jednego tygodnia, a ustawienia nie są ograniczone ilościowo. W celu zminimalizowania objętości wykorzystany został zapis tożsamy ze zmienną boolean, czyli dopiero wystąpienie znaku wskazuje na włączoną funkcję.
 
-* wybrana minimalna temperatura umieszczona jest przed znacznikiem termostatu 't' i przed zdefiniowanymi dniami tygodnia
-* 'w' cały tydzień
 * 'o' poniedziałek, 'u' wtorek, 'e' środa, 'h' czwartek, 'r' piątek, 'a' sobota, 's' niedziela
-* '_' od godziny - jeśli znak występuje w zapisie, przed nim znajduje się godzina w zapisie czasu uniksowego
-* '-' do godziny - jeśli występuje w zapisie, po nim znajduje się godzina w zapisie czasu uniksowego
+* Brak wskazania dnia wygodnia oznacza, że ustawienie obejmuje cały tydzień
+* 'n' wyzwalacz o zachodzie słońca.
+* 'd' wyzwalacz o wschodzie słońca
+* '<' wyzwalacz o zmroku
+* '>' wyzwalacz o świcie
+* 'z' wyzwalacz reaguj na zachmurzenie (po zmroku oraz po świcie)
+* Każdy z powyższych wyzwalaczy może zawierać dodatkowe parametry zawarte w nawiasach, jak opóźnienie czasowe lub własne ustawienie LDR.
+* 'l()', 'b()', 't()', 'c()' to wyzwalacze związane bezpośrednio z urządzeniem.
+* 'l()' włączenie/wyłączenie światła
+* 'b()', 'c()' pozycja rolety lub okna
+* 't()' osiągnięcie określonej temperatury na termostacie
+* '_' o godzinie - jeśli znak występuje w zapisie, przed nim znajduje się godzina w zapisie czasu uniksowego
+* 'h(-1;-1)' między godzinami, jeśli obie cyfry są różne od "-1" lub po godzinie, przed godziną. "-1" oznacza, że nie ma wskazanej godziny
 * '/' wyłącz ustawienie - obecność znaku wskazuje, że ustawienie będzie ignorowane
-
-Przykład zapisu dwóch ustawień automatycznych: 360_20.5touehr-1260,/330_20.0tw-360
-
-Obecność znaku 't' wskazuje, że ustawienie dotyczy termostatu.
+* '&' wszystkie wyzwalacze muszą zostać spełnione by wykonać akcje
+* cyfra między symbolami "|" i "|" (lub "&" jako drugi symbol, jeśli jest wskazanie na wszystkie wyzwalacze) oznacza akcje do wykonania
+* Obecność znaku 't' wskazuje, że ustawienie dotyczy termostatu.
+* 'r()' i 'r2()' w nawiasach zawierają warunki, które muszą być spełnione w chwili aktywacji wyzwalacza, aby wykonać akcje
+* 'r()' to wymaganie określonego stanu świateł, pozycji rolety, okna lub stanu czy temperatury termostatu
+* 'r2()' wymaganie dotyczące pozycji słońca: wschód, zmierzch, świt, zmrok
 
 ### Sterowanie
 Sterowanie urządzeniem odbywa się poprzez wykorzystanie metod dostępnych w protokole HTTP. Sterować można z przeglądarki lub dedykowanej aplikacji.
